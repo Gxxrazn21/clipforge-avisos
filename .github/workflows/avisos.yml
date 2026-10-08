@@ -1,0 +1,40 @@
+name: Avisos de directo
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"       # cada 5 min (GitHub a veces lo retrasa unos minutos)
+  workflow_dispatch: {}          # botón "Run workflow" para probar a mano
+
+permissions:
+  contents: write                # para guardar estado.json (qué directos ya se avisaron)
+
+concurrency:
+  group: avisos
+  cancel-in-progress: false
+
+jobs:
+  avisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - name: Revisar quién está en directo
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python avisos.py
+      - name: Guardar estado
+        run: |
+          if ! git diff --quiet estado.json; then
+            git config user.name "clipforge-avisos"
+            git config user.email "clipforge-avisos@users.noreply.github.com"
+            git add estado.json
+            git commit -m "estado: directos avisados"
+            git push
+          fi
