@@ -124,6 +124,50 @@ def mensaje(lv: dict, modo: str) -> tuple[str, dict]:
     return "\n".join(lines), {"inline_keyboard": botones}
 
 
+ESTADO_PALABRAS = {"estado", "status", "progreso", "como vas", "cómo vas"}
+
+
+def responder_estado(token: str, chat: str, estado: dict, vivos: list) -> bool:
+    """Si escribiste «estado» y ClipForge no lo contestó (PC apagado o app cerrada), contesta la nube.
+
+    Lee los mensajes pendientes SIN confirmarlos (no se pasa offset), así ClipForge los sigue
+    recibiendo al abrirse. Si ClipForge está escuchando, Telegram responde 409 y no se hace nada.
+    """
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{token}/getUpdates", timeout=20, data={
+            "timeout": 0, "allowed_updates": json.dumps(["callback_query", "message"])}).json()
+    except Exception:      # noqa: BLE001
+        return False
+    if not r.get("ok"):
+        return False                                   # 409: ClipForge está abierto y escuchando
+    hechos = set(estado.get("respondidos", []))
+    cambiado = False
+    ya_contestado = False                              # una sola respuesta aunque escribas «estado» varias veces
+    for u in r.get("result", []):
+        msg = u.get("message") or {}
+        texto = (msg.get("text") or "").strip().lower().lstrip("/")
+        if texto not in ESTADO_PALABRAS or u["update_id"] in hechos:
+            continue
+        if str((msg.get("chat") or {}).get("id")) != str(chat):
+            continue
+        if time.time() - msg.get("date", 0) < 90:
+            continue                                   # dale tiempo a ClipForge a contestar primero
+        hechos.add(u["update_id"])
+        cambiado = True
+        if ya_contestado:
+            continue
+        ya_contestado = True
+        en_vivo = ", ".join(handle(v["canal"]) for v in vivos[:8]) or "nadie de tu lista"
+        texto_r = ("💤 <b>ClipForge está cerrado</b> (o tu PC apagado), así que ahora no saca clips.\n"
+                   f"☁️ Los avisos de directo siguen activos desde la nube.\n🔴 En directo ahora: {html.escape(en_vivo)}\n"
+                   "Abre ClipForge en el PC y toca «Sacar clips» en el aviso que quieras.")
+        requests.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=20,
+                      data={"chat_id": chat, "text": texto_r, "parse_mode": "HTML"})
+    if cambiado:
+        estado["respondidos"] = sorted(hechos)[-200:]
+    return cambiado
+
+
 def main():
     prueba = "--prueba" in sys.argv
     token, chat = os.environ.get("TELEGRAM_TOKEN", ""), os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -166,7 +210,8 @@ def main():
             continue
         avisados.append(lv["id"])
         print("avisado:", handle(lv["canal"]))
-    if nuevos and not prueba:
+    respondio = False if prueba else responder_estado(token, chat, estado, vivos)
+    if (nuevos or respondio) and not prueba:
         estado["avisados"] = avisados[-500:]
         ESTADO.write_text(json.dumps(estado, indent=1), encoding="utf-8")
 
