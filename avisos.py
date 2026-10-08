@@ -134,8 +134,7 @@ def main():
         # ejecución manual con "saludo": confirma que la nube puede escribirte
         requests.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=20, data={
             "chat_id": chat, "parse_mode": "HTML",
-            "text": f"☁️ <b>Avisos desde la nube activos.</b>
-Reviso tus {len(canales)} canales cada ~5 min, "
+            "text": f"☁️ <b>Avisos desde la nube activos.</b>\nReviso tus {len(canales)} canales cada ~5 min, "
                     "aunque tu PC esté apagado."})
     modos = {c["url"]: c.get("modo", "aviso") for c in canales}
     try:
