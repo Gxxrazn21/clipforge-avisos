@@ -2,7 +2,7 @@ name: Avisos de directo
 
 on:
   schedule:
-    - cron: "*/5 * * * *"       # cada 5 min (GitHub a veces lo retrasa unos minutos)
+    - cron: "2-59/5 * * * *"     # cada 5 min, lejos de la hora en punto (GitHub retrasa esos minutos)
   workflow_dispatch:             # botón "Run workflow" para probar a mano
     inputs:
       saludo:
