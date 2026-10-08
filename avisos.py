@@ -130,6 +130,13 @@ def main():
     if not (token and chat):
         prueba = True
     canales = json.loads(CANALES.read_text(encoding="utf-8"))
+    if os.environ.get("SALUDO") == "true" and not prueba:
+        # ejecución manual con "saludo": confirma que la nube puede escribirte
+        requests.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=20, data={
+            "chat_id": chat, "parse_mode": "HTML",
+            "text": f"☁️ <b>Avisos desde la nube activos.</b>
+Reviso tus {len(canales)} canales cada ~5 min, "
+                    "aunque tu PC esté apagado."})
     modos = {c["url"]: c.get("modo", "aviso") for c in canales}
     try:
         estado = json.loads(ESTADO.read_text(encoding="utf-8"))
