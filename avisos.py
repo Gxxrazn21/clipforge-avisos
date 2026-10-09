@@ -125,46 +125,137 @@ def mensaje(lv: dict, modo: str) -> tuple[str, dict]:
 
 
 ESTADO_PALABRAS = {"estado", "status", "progreso", "como vas", "cómo vas"}
+CERRADO = "💤 <i>ClipForge está cerrado en tu PC: te contesto desde la nube.</i>"
+AYUDA = ("🤖 <b>Comandos de ClipForge</b>\n"
+         "/envivo — quién de tus canales está en directo ahora\n"
+         "/seguir <i>nombre</i> — sigue ese canal: si está en vivo graba y te manda los clips; si no, espera a que prenda\n"
+         "/seguir — sin nombre, te muestro los que están en vivo para elegir\n"
+         "/detener — deja de seguir el canal actual\n"
+         "/canales — tus canales y su modo\n"
+         "/estado — qué está haciendo ClipForge ahora\n"
+         "\nCon el PC apagado te contesto desde la nube y lo que pidas con /seguir empieza al abrir ClipForge.")
 
 
-def responder_estado(token: str, chat: str, estado: dict, vivos: list) -> bool:
-    """Si escribiste «estado» y ClipForge no lo contestó (PC apagado o app cerrada), contesta la nube.
+def _buscar(texto: str, canales: list) -> str | None:
+    """«westcol», «@DjMaRiiO», «djma» o una URL → la URL del canal en tu lista."""
+    t = texto.strip().rstrip("/")
+    if t.startswith("http"):
+        return t
+    q = t.lower().lstrip("@")
+    por = {handle(c["url"]).lower(): c["url"].rstrip("/") for c in canales}
+    if q in por:
+        return por[q]
+    hits = [u for h, u in por.items() if h.startswith(q)] or [u for h, u in por.items() if q in h]
+    return hits[0] if len(hits) == 1 else None
+
+
+def respuesta(cmd: str, arg: str, crudo: str, vivos: list, canales: list) -> tuple[str, str, list | None] | None:
+    """(tipo, texto, botones) para un comando escrito con ClipForge cerrado; None si no es un comando."""
+    seguir = lambda v: {"text": f"🎬 Sacar clips de {handle(v['canal'])}", "callback_data": f"follow|{v['canal']}"[:64]}  # noqa: E731
+    if cmd in ESTADO_PALABRAS or crudo in ESTADO_PALABRAS:
+        en_vivo = ", ".join(handle(v["canal"]) for v in vivos[:8]) or "nadie de tu lista"
+        return ("estado", "💤 <b>ClipForge está cerrado</b> (o tu PC apagado), así que ahora no saca clips.\n"
+                f"☁️ Los avisos de directo siguen activos desde la nube.\n🔴 En directo ahora: {html.escape(en_vivo)}\n"
+                "Abre ClipForge en el PC o escribe <code>/seguir nombre</code> y empezará al abrirlo.", None)
+    if cmd in ("envivo", "vivo", "directos", "live"):
+        if not vivos:
+            return ("envivo", "😴 Nadie de tu lista está en directo ahora.\n" + CERRADO, None)
+        lineas = ["🔴 <b>En directo ahora</b>"]
+        for v in vivos[:12]:
+            extra = " · ".join(x for x in (f"{v['viendo']:,} viendo".replace(",", ".") if v["viendo"] else "",
+                                           v["categoria"]) if x)
+            lineas.append(f"• <b>{html.escape(handle(v['canal']))}</b>" + (f" — {html.escape(extra)}" if extra else ""))
+        lineas.append(CERRADO)
+        return ("envivo", "\n".join(lineas), [[seguir(v), {"text": "▶️ Ver", "url": v["url"]}] for v in vivos[:8]])
+    if cmd in ("canales", "lista"):
+        vivo = {v["canal"].rstrip("/") for v in vivos}
+        lineas = [f"📺 <b>Tus canales</b> ({len(canales)})"]
+        for c in canales:
+            tag = "Clips" if c.get("modo") == "clips" else "Aviso"
+            lineas.append(f"• <b>{html.escape(handle(c['url']))}</b> · {tag}" + (" · 🔴 en vivo" if c["url"].rstrip("/") in vivo else ""))
+        lineas.append("\nPara seguir uno: <code>/seguir nombre</code>\n" + CERRADO)
+        return ("canales", "\n".join(lineas), None)
+    if cmd in ("seguir", "sigue", "follow"):
+        if not arg:
+            if not vivos:
+                return ("seguir", "😴 Ahora nadie de tu lista está en directo. Escribe <code>/seguir nombre</code> "
+                        "y ClipForge lo seguirá al abrirlo.\n" + CERRADO, None)
+            return ("seguir", "🎬 ¿A quién sigo? Están en directo (empieza al abrir ClipForge):\n" + CERRADO,
+                    [[seguir(v)] for v in vivos[:8]])
+        url = _buscar(arg, canales)
+        if not url:
+            return ("seguir", f"No encuentro «{html.escape(arg)}» entre tus canales. Escribe /canales para verlos.", None)
+        return ("seguir:" + url, f"📝 Anotado: <b>{html.escape(handle(url))}</b>. En cuanto abras ClipForge en el PC "
+                "empezará con él (el pedido vale 12 h).\n" + CERRADO, None)
+    if cmd in ("detener", "parar", "dejar", "stop"):
+        return ("detener", "💤 ClipForge está cerrado: ahora no está siguiendo ningún canal.", None)
+    if cmd in ("ayuda", "help", "start", "comandos"):
+        return ("ayuda", AYUDA + "\n" + CERRADO, None)
+    return None
+
+
+def _tg(token: str, metodo: str, **data) -> dict:
+    try:
+        return requests.post(f"https://api.telegram.org/bot{token}/{metodo}", timeout=20, data=data).json()
+    except Exception:      # noqa: BLE001
+        return {}
+
+
+def responder(token: str, chat: str, estado: dict, vivos: list, canales: list) -> bool:
+    """Si escribiste un comando (o tocaste «Sacar clips») y ClipForge no lo contestó (PC apagado o app
+    cerrada), contesta la nube.
 
     Lee los mensajes pendientes SIN confirmarlos (no se pasa offset), así ClipForge los sigue
-    recibiendo al abrirse. Si ClipForge está escuchando, Telegram responde 409 y no se hace nada.
+    recibiendo al abrirse (y hace lo que pediste con /seguir o el botón). Si ClipForge está
+    escuchando, Telegram responde 409 y no se hace nada.
     """
-    try:
-        r = requests.post(f"https://api.telegram.org/bot{token}/getUpdates", timeout=20, data={
-            "timeout": 0, "allowed_updates": json.dumps(["callback_query", "message"])}).json()
-    except Exception:      # noqa: BLE001
-        return False
+    r = _tg(token, "getUpdates", timeout=0, allowed_updates=json.dumps(["callback_query", "message"]))
     if not r.get("ok"):
         return False                                   # 409: ClipForge está abierto y escuchando
     hechos = set(estado.get("respondidos", []))
     cambiado = False
-    ya_contestado = False                              # una sola respuesta aunque escribas «estado» varias veces
+    dados: set = set()                                 # una sola respuesta por tipo aunque repitas el comando
     for u in r.get("result", []):
-        msg = u.get("message") or {}
-        texto = (msg.get("text") or "").strip().lower().lstrip("/")
-        if texto not in ESTADO_PALABRAS or u["update_id"] in hechos:
+        if u["update_id"] in hechos:
             continue
+        cq = u.get("callback_query")
+        if cq:
+            data = str(cq.get("data", ""))
+            if not data.startswith("follow|") or str((cq.get("from") or {}).get("id")) != str(chat):
+                continue
+            hechos.add(u["update_id"])
+            cambiado = True
+            nombre = handle(data.split("|", 1)[1])
+            _tg(token, "answerCallbackQuery", callback_query_id=cq.get("id"),
+                text=f"Anotado: al abrir ClipForge empezará con {nombre}"[:190])
+            if ("boton", nombre) not in dados:
+                dados.add(("boton", nombre))
+                _tg(token, "sendMessage", chat_id=chat, parse_mode="HTML",
+                    text=f"📝 Anotado: <b>{html.escape(nombre)}</b>. En cuanto abras ClipForge en el PC empezará con él "
+                         f"(el pedido vale 12 h).\n{CERRADO}")
+            continue
+        msg = u.get("message") or {}
         if str((msg.get("chat") or {}).get("id")) != str(chat):
             continue
-        if time.time() - msg.get("date", 0) < 90:
+        texto = (msg.get("text") or "").strip()
+        if not texto or time.time() - msg.get("date", 0) < 90:
             continue                                   # dale tiempo a ClipForge a contestar primero
+        palabra, _, arg = texto.partition(" ")
+        out = respuesta(palabra.lower().lstrip("/").split("@")[0], arg.strip(), texto.lower(), vivos, canales)
+        if out is None:
+            continue
         hechos.add(u["update_id"])
         cambiado = True
-        if ya_contestado:
+        tipo, texto_r, botones = out
+        if tipo in dados:
             continue
-        ya_contestado = True
-        en_vivo = ", ".join(handle(v["canal"]) for v in vivos[:8]) or "nadie de tu lista"
-        texto_r = ("💤 <b>ClipForge está cerrado</b> (o tu PC apagado), así que ahora no saca clips.\n"
-                   f"☁️ Los avisos de directo siguen activos desde la nube.\n🔴 En directo ahora: {html.escape(en_vivo)}\n"
-                   "Abre ClipForge en el PC y toca «Sacar clips» en el aviso que quieras.")
-        requests.post(f"https://api.telegram.org/bot{token}/sendMessage", timeout=20,
-                      data={"chat_id": chat, "text": texto_r, "parse_mode": "HTML"})
+        dados.add(tipo)
+        datos = {"chat_id": chat, "text": texto_r, "parse_mode": "HTML", "disable_web_page_preview": "true"}
+        if botones:
+            datos["reply_markup"] = json.dumps({"inline_keyboard": botones})
+        _tg(token, "sendMessage", **datos)
     if cambiado:
-        estado["respondidos"] = sorted(hechos)[-200:]
+        estado["respondidos"] = sorted(hechos)[-300:]
     return cambiado
 
 
@@ -210,7 +301,7 @@ def main():
             continue
         avisados.append(lv["id"])
         print("avisado:", handle(lv["canal"]))
-    respondio = False if prueba else responder_estado(token, chat, estado, vivos)
+    respondio = False if prueba else responder(token, chat, estado, vivos, canales)
     if (nuevos or respondio) and not prueba:
         estado["avisados"] = avisados[-500:]
         ESTADO.write_text(json.dumps(estado, indent=1), encoding="utf-8")

@@ -2,8 +2,10 @@ name: Avisos de directo
 
 on:
   schedule:
-    - cron: "2-59/5 * * * *"     # cada 5 min, lejos de la hora en punto (GitHub retrasa esos minutos)
-  workflow_dispatch:             # botón "Run workflow" para probar a mano
+    # respaldo: GitHub solo lo lanza cada varias horas. El ritmo de 5 min lo da cron-job.org
+    # llamando a «workflow_dispatch» (ver README)
+    - cron: "2-59/5 * * * *"
+  workflow_dispatch:             # cron-job.org cada 5 min, o el botón "Run workflow" para probar
     inputs:
       saludo:
         description: "Enviar un mensaje de prueba a Telegram"
@@ -23,6 +25,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main                # el estado más reciente, aunque esta ejecución estuviera en cola
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -42,5 +46,8 @@ jobs:
             git config user.email "clipforge-avisos@users.noreply.github.com"
             git add estado.json
             git commit -m "estado: directos avisados"
-            git push
+            for i in 1 2 3; do
+              git pull --rebase --autostash origin main && git push && break
+              sleep 3
+            done
           fi
